@@ -1,0 +1,5 @@
+comment = 'postgres_redis:  Created by pgrx'
+default_version = '@CARGO_VERSION@'
+module_pathname = '$libdir/postgres_redis'
+relocatable = false
+superuser = true
