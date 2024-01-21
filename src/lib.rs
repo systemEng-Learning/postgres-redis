@@ -1,21 +1,22 @@
 use pgrx::{prelude::*, register_hook, PgHooks};
 
 pub mod select;
+pub mod update;
 
 pgrx::pg_module_magic!();
 
 // Copied from https://github.com/postgres/postgres/blob/b725b7eec431f7394d63abe621170efe3fcdcda4/src/include/nodes/nodes.h#L252C1-L264C11
 enum CmdType {
     _UNKNOWN_,
-    SELECT, /* select stmt */
-    UPDATE, /* update stmt */
+    SELECT,   /* select stmt */
+    UPDATE,   /* update stmt */
     _INSERT_, /* insert stmt */
     _DELETE_, /* delete stmt */
     _MERGE_,  /* merge stmt */
     _UTILITY_, /* cmds like create, destroy, copy, vacuum,
-             * etc. */
+               * etc. */
     _NOTHING_, /* dummy command for instead nothing rules
-              * with qual */
+                * with qual */
 }
 
 struct PRHook;
@@ -29,6 +30,8 @@ impl PgHooks for PRHook {
         let op = query_desc.operation;
         if op == CmdType::SELECT as u32 {
             select::handle_select(&query_desc);
+        } else if op == CmdType::UPDATE as u32 {
+            update::handle_update(&query_desc);
         } else if op == CmdType::UPDATE as u32 {
         }
         prev_hook(query_desc)
