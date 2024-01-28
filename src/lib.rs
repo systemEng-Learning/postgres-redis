@@ -1,5 +1,5 @@
-use pgrx::{prelude::*, register_hook, PgHooks};
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE};
+use pgrx::{prelude::*, register_hook, PgHooks};
 
 pub mod select;
 pub mod update;
@@ -16,7 +16,7 @@ impl PgHooks for PRHook {
     ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
         if op == CmdType_CMD_SELECT {
-            select::handle_select(&query_desc);
+            select::handle_select(&query_desc, "test");
         } else if op == CmdType_CMD_UPDATE {
             update::handle_update(&query_desc);
         }
