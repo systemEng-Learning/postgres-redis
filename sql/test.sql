@@ -14,4 +14,4 @@ CREATE TABLE users (
     password varchar(100)
 );
 
-INSERT INTO users (first_name, last_name, password) VALUES ('Adebayo', 'Chukwuma', '123456'), ('Usman', 'Efe', '987654');
+INSERT INTO users (first_name, last_name, password) VALUES ('Adebayo', 'Chukwuma', '123456'), ('Usman', 'Efe', '987654'), ('Bob', 'Sydney', '987654');
