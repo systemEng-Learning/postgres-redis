@@ -1,5 +1,6 @@
-use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE};
+use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, PgHooks};
+use select::{create_custom_dest_receiver, CustomDestReceiver};
 
 pub mod select;
 pub mod update;
@@ -9,6 +10,33 @@ pgrx::pg_module_magic!();
 struct PRHook;
 
 impl PgHooks for PRHook {
+    fn executor_run(
+            &mut self,
+            query_desc: PgBox<pg_sys::QueryDesc>,
+            direction: pg_sys::ScanDirection,
+            count: u64,
+            execute_once: bool,
+            prev_hook: fn(
+                query_desc: PgBox<pg_sys::QueryDesc>,
+                direction: pg_sys::ScanDirection,
+                count: u64,
+                execute_once: bool,
+            ) -> pgrx::HookResult<()>,
+        ) -> pgrx::HookResult<()> {
+            let new_query_desc;
+            unsafe {
+                CUSTOMRECEIVER.original_dest = Some(query_desc.dest);
+                let d = *query_desc.dest;
+                CUSTOMRECEIVER.mydest = d.mydest;
+                let s = &mut CUSTOMRECEIVER as *mut CustomDestReceiver;
+                let t = s as *mut DestReceiver;
+                let q = query_desc.into_pg();
+                (*q).dest = t;
+                new_query_desc = PgBox::from_pg(q);
+            }
+            prev_hook(new_query_desc, direction, count, execute_once)
+    }
+
     fn executor_end(
         &mut self,
         query_desc: PgBox<pg_sys::QueryDesc>,
@@ -25,6 +53,7 @@ impl PgHooks for PRHook {
 }
 
 static mut HOOK: PRHook = PRHook {};
+static mut CUSTOMRECEIVER: CustomDestReceiver = create_custom_dest_receiver();
 
 #[pg_extern]
 fn hello_postgres_redis() -> &'static str {
