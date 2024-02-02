@@ -1,5 +1,5 @@
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
-use pgrx::{prelude::*, register_hook, PgHooks};
+use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 
 pub mod select;
@@ -23,7 +23,9 @@ impl PgHooks for PRHook {
                 execute_once: bool,
             ) -> pgrx::HookResult<()>,
         ) -> pgrx::HookResult<()> {
-            let new_query_desc;
+        let op = query_desc.operation;
+        let new_query_desc;
+        if op == CmdType_CMD_SELECT {
             unsafe {
                 CUSTOMRECEIVER.original_dest = Some(query_desc.dest);
                 let d = *query_desc.dest;
@@ -34,7 +36,11 @@ impl PgHooks for PRHook {
                 (*q).dest = t;
                 new_query_desc = PgBox::from_pg(q);
             }
-            prev_hook(new_query_desc, direction, count, execute_once)
+            prev_hook(new_query_desc, direction, count, execute_once);
+        } else {
+            prev_hook(query_desc, direction, count, execute_once);
+        }
+        HookResult::new(())
     }
 
     fn executor_end(

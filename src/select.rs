@@ -1,5 +1,5 @@
 use pgrx::{
-    pg_sys::{self, rt_fetch, CommandDest, CommandDest_DestNone, DestReceiver, TupleDesc, TupleTableSlot, RELKIND_RELATION},
+    pg_sys::{self, getTypeOutputInfo, rt_fetch, slot_getsomeattrs_int, CommandDest, CommandDest_DestNone, Datum, DestReceiver, Oid, OidOutputFunctionCall, TupleDesc, TupleTableSlot, RELKIND_RELATION},
     prelude::*,
 };
 use std::ffi::CStr;
@@ -60,11 +60,10 @@ pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
     }
 }
 
-pub type CustomDestReceiver = _CustomDestReceiver;
 #[repr(C)]
 #[allow(non_snake_case)]
 #[derive(Debug, Copy, Clone)]
-pub struct _CustomDestReceiver {
+pub struct CustomDestReceiver {
     pub receiveSlot: Option<unsafe extern "C" fn(_: *mut TupleTableSlot, _: *mut DestReceiver) -> bool>,
     pub rStartup: Option<
         unsafe extern "C" fn(
@@ -77,7 +76,6 @@ pub struct _CustomDestReceiver {
     pub rDestroy: Option<unsafe extern "C" fn(self_: *mut DestReceiver)>,
     pub mydest: CommandDest,
     pub original_dest: Option<*mut DestReceiver>,
-    pub wow: u64,
 }
 
 pub const fn create_custom_dest_receiver() -> CustomDestReceiver {
@@ -88,7 +86,6 @@ pub const fn create_custom_dest_receiver() -> CustomDestReceiver {
         rDestroy: Some(destroy),
         mydest: CommandDest_DestNone,
         original_dest: None,
-        wow: 98
     }
 }
 
@@ -101,6 +98,29 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
     );
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
+        let typeinfo = (*slot).tts_tupleDescriptor;
+        let tinfo = &(*typeinfo);
+        let nattrs = tinfo.natts as usize;
+        let attrs = tinfo.attrs.as_slice(nattrs);
+        let mut typoutput: Oid = Oid::default();
+        let mut typvarlena: bool = false;
+        for i in 0..nattrs {
+            let attr = slot_getattr(slot, i+1);
+            if attr.is_none() {
+                continue;
+            }
+            let attr = attr.unwrap();
+            getTypeOutputInfo(attrs[i].atttypid, 
+                &mut typoutput as *mut Oid, &mut typvarlena as *mut bool);
+            let value = OidOutputFunctionCall(typoutput, attr);
+            let value = CStr::from_ptr(value);
+            let value = value
+                .to_str()
+                .expect("Failed to convert Postgres query string for rust");
+            println!("r\t{i}: = \"{value}\" {}\t(typeid = {}, len = {}, typmod = {}, byval = {})", 
+                    attrs[i].name(), attrs[i].atttypid.as_u32(),
+                    attrs[i].attlen, attrs[i].type_mod(), attrs[i].attbyval);
+        }
         let custom_receiver = *custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.receiveSlot {
@@ -119,6 +139,14 @@ pub extern "C" fn startup(receiver: *mut DestReceiver, operation: c_int, typeinf
     );
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
+        let tinfo = &(*typeinfo);
+        let nattrs = tinfo.natts as usize;
+        let attrs = tinfo.attrs.as_slice(nattrs);
+        for i in 0..nattrs {
+            println!("s\t{i}: {}\t(typeid = {}, len = {}, typmod = {}, byval = {})", 
+                    attrs[i].name(), attrs[i].atttypid.as_u32(),
+                    attrs[i].attlen, attrs[i].type_mod(), attrs[i].attbyval);
+        }
         let custom_receiver = *custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.rStartup {
@@ -149,4 +177,17 @@ pub extern "C" fn destroy(receiver: *mut DestReceiver) {
     }
 }
 
+unsafe fn slot_getattr(slot: *mut TupleTableSlot, attnum: usize) -> Option<Datum> {
+    let real_slot = &(*slot);
+    if attnum as i16 > real_slot.tts_nvalid  {
+        slot_getsomeattrs_int(slot, attnum as i32);
+    }
 
+    let is_null = *real_slot.tts_isnull.offset(attnum as isize-1);
+
+    if is_null {
+        return None;
+    }
+	let datum = *real_slot.tts_values.offset(attnum as isize - 1);
+    Some(datum)
+}
