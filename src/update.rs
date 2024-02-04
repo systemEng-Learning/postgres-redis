@@ -1,5 +1,5 @@
 use pgrx::{
-    pg_sys::{self, rt_fetch, RELKIND_RELATION},
+    pg_sys::{self, getTypeOutputInfo, rt_fetch, Oid, OidOutputFunctionCall, RELKIND_RELATION},
     prelude::*,
     PgTupleDesc,
 };
@@ -43,36 +43,69 @@ pub fn handle_update(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
     let mut single_row = false;
 
     unsafe {
-        let p = *(query_desc.plannedstmt);
-        let estate: pgrx::prelude::pg_sys::EState = *(query_desc.estate);
-        let result_rel_info = estate.es_result_relation_info;
+        let desc_pointer = *(query_desc.plannedstmt);
+        let estate = *(query_desc.estate);
+        let result_rel_info = estate.es_result_relations;
 
         if !result_rel_info.is_null() {
             let relation_rel = *result_rel_info;
-            let relation_desc = *(relation_rel.ri_RelationDesc);
-            let tuple_old_slot = *(relation_rel.ri_TrigOldSlot);
-            let tuple_desc = PgTupleDesc::from_pg_unchecked(relation_desc.rd_att);
-            // let tuple_desc = *relation_desc.rd_att;
+            let relation_desc = (*relation_rel).ri_RelationDesc;
+
+            // let tuple_old_slot: *mut pgrx::prelude::pg_sys::TupleTableSlot =
+            //     ((*relation_rel).ri_oldTupleSlot);
+
+            let tuple_new_slot = *((*relation_rel).ri_newTupleSlot);
+
+            if relation_desc.is_null() {
+                let s = format!("PostgresRedis > relation_desc is null");
+                ereport!(
+                    PgLogLevel::NOTICE,
+                    PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
+                    s
+                );
+            }
+
+            let relation_descp: pgrx::prelude::pg_sys::RelationData = *relation_desc;
+            let tuple_desc = PgTupleDesc::from_pg_unchecked(relation_descp.rd_att);
             let natts = tuple_desc.natts;
+            let s = format!("PostgresRedis > natts is {}", natts);
+            ereport!(
+                PgLogLevel::NOTICE,
+                PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
+                s
+            );
 
             for i in 0..natts {
-                let is_null = *tuple_old_slot.tts_isnull.add(i as usize);
+                let is_null = *tuple_new_slot.tts_isnull.add(i as usize);
                 if is_null {
                     //rough work
                     // let attrname = CStr::from_ptr(*tuple_desc.attrs.add(i as usize).attname);
-                    let p = tuple_desc.attrs.as_ptr();
-                    let y = *p.add(i as usize);
-                    let yy = y.name();
-                    let s = format!("PostgresRedis > Column {} is updated to NULL ", yy);
+                    let desc_pointer = tuple_desc.attrs.as_ptr();
+                    let desc_attr = *desc_pointer.add(i as usize);
+                    let attr = desc_attr.name();
+                    let s = format!("PostgresRedis > Column {} is updated to NULL ", attr);
                     ereport!(
                         PgLogLevel::NOTICE,
                         PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
                         s
                     );
                 } else {
-                    // let p = *tuple_desc.attrs.as_ptr();
-                    // let nameTuple = p.name();
-                    let s = format!("PostgresRedis > here is column and value updated");
+                    let desc_pointer = tuple_desc.attrs.as_ptr();
+                    let desc_attr = *desc_pointer.add(i as usize);
+                    let attr = desc_attr.name();
+                    let value_pointer = *tuple_new_slot.tts_values.add(i as usize);
+                    let mut foutoid: Oid = Oid::default();
+                    let mut typisvarlena: bool = false;
+                    let typoid: Oid = desc_attr.atttypid;
+                    getTypeOutputInfo(typoid, &mut foutoid, &mut typisvarlena);
+                    let output = OidOutputFunctionCall(foutoid, value_pointer);
+                    let output_value = CStr::from_ptr(output);
+
+                    let s = format!(
+                        "PostgresRedis > Column {} is updated to  {}",
+                        attr,
+                        output_value.to_str().unwrap()
+                    );
                     ereport!(
                         PgLogLevel::NOTICE,
                         PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
@@ -86,7 +119,7 @@ pub fn handle_update(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
             single_row = true;
         }
 
-        let table_lists = p.rtable;
+        let table_lists = desc_pointer.rtable;
         let mut length = 0;
         if !table_lists.is_null() {
             length = table_lists.as_ref().unwrap().length;
