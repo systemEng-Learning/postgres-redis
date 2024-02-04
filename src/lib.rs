@@ -7,7 +7,9 @@ pub mod update;
 
 pgrx::pg_module_magic!();
 
-struct PRHook;
+struct PRHook {
+    custom_receiver: Option<CustomDestReceiver>
+}
 
 impl PgHooks for PRHook {
     fn executor_run(
@@ -24,19 +26,21 @@ impl PgHooks for PRHook {
             ) -> pgrx::HookResult<()>,
         ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
-        let new_query_desc;
-        if op == CmdType_CMD_SELECT {
+        if op == CmdType_CMD_SELECT && select::is_contain_table(&query_desc, "test") {
+            let mut custom_receiver: CustomDestReceiver = create_custom_dest_receiver("description");
+            custom_receiver.original_dest = Some(query_desc.dest);
+            let new_query_desc;
             unsafe {
-                CUSTOMRECEIVER.original_dest = Some(query_desc.dest);
                 let d = *query_desc.dest;
-                CUSTOMRECEIVER.mydest = d.mydest;
-                let s = &mut CUSTOMRECEIVER as *mut CustomDestReceiver;
+                custom_receiver.mydest = d.mydest;
+                let s = &mut custom_receiver as *mut CustomDestReceiver;
                 let t = s as *mut DestReceiver;
                 let q = query_desc.into_pg();
                 (*q).dest = t;
                 new_query_desc = PgBox::from_pg(q);
             }
             prev_hook(new_query_desc, direction, count, execute_once);
+            self.custom_receiver = Some(custom_receiver);
         } else {
             prev_hook(query_desc, direction, count, execute_once);
         }
@@ -50,7 +54,7 @@ impl PgHooks for PRHook {
     ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
         if op == CmdType_CMD_SELECT {
-            select::handle_select(&query_desc, "test");
+            select::handle_select(&query_desc, "test", &self.custom_receiver);
         } else if op == CmdType_CMD_UPDATE {
             update::handle_update(&query_desc, "users");
         }
@@ -58,8 +62,7 @@ impl PgHooks for PRHook {
     }
 }
 
-static mut HOOK: PRHook = PRHook {};
-static mut CUSTOMRECEIVER: CustomDestReceiver = create_custom_dest_receiver();
+static mut HOOK: PRHook = PRHook {custom_receiver: None};
 
 #[pg_extern]
 fn hello_postgres_redis() -> &'static str {

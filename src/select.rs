@@ -5,7 +5,7 @@ use pgrx::{
 use std::ffi::CStr;
 use std::os::raw::c_int;
 
-pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str) {
+pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str, custom_receiver: &Option<CustomDestReceiver>) {
     let raw_query_string = unsafe { CStr::from_ptr(query_desc.sourceText) };
     let query_string = raw_query_string
         .to_str()
@@ -14,31 +14,13 @@ pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
     let mut expected_table = false;
     let mut single_row = false;
     unsafe {
-        let p = *(query_desc.plannedstmt);
         let estate = *(query_desc.estate);
         if estate.es_processed == 1 {
             single_row = true;
         }
 
-        let table_lists = p.rtable;
-        let mut length = 0;
-        if !table_lists.is_null() {
-            length = table_lists.as_ref().unwrap().length;
-        }
-        for i in 1..=length {
-            let table_entry = *rt_fetch(i as u32, table_lists);
-            if table_entry.relkind as u8 != RELKIND_RELATION {
-                continue;
-            }
-            let table_data = *table_entry.eref;
-            let name = CStr::from_ptr(table_data.aliasname);
-            let name = name
-                .to_str()
-                .expect("Failed to convert Postgres query string for rust");
-            if name == expected_table_name {
-                expected_table = true;
-                break;
-            }
+        if !custom_receiver.is_none() {
+            expected_table = true;
         }
     }
     if expected_table {
@@ -58,11 +40,53 @@ pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
             s
         );
     }
+
+    if !custom_receiver.is_none() {
+        let custom_receiver = custom_receiver.as_ref().unwrap();
+        if custom_receiver.values.len() > 0 {
+            let t = custom_receiver.values.join(", ");
+            let s = format!("PostgresRedis > The values of column {} in table {expected_table_name} are {t}", custom_receiver.column);
+            ereport!(
+                PgLogLevel::NOTICE,
+                PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
+                s
+            );
+        }
+    }
+}
+
+pub fn is_contain_table(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str) -> bool {
+    let mut result = false;
+    unsafe {
+        let p = *(query_desc.plannedstmt);
+
+        let table_lists = p.rtable;
+        let mut length = 0;
+        if !table_lists.is_null() {
+            length = table_lists.as_ref().unwrap().length;
+        }
+        for i in 1..=length {
+            let table_entry = *rt_fetch(i as u32, table_lists);
+            if table_entry.relkind as u8 != RELKIND_RELATION {
+                continue;
+            }
+            let table_data = *table_entry.eref;
+            let name = CStr::from_ptr(table_data.aliasname);
+            let name = name
+                .to_str()
+                .expect("Failed to convert Postgres query string for rust");
+            if name == expected_table_name {
+                result = true;
+                break;
+            }
+        }
+    }
+    result
 }
 
 #[repr(C)]
 #[allow(non_snake_case)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub struct CustomDestReceiver {
     pub receiveSlot: Option<unsafe extern "C" fn(_: *mut TupleTableSlot, _: *mut DestReceiver) -> bool>,
     pub rStartup: Option<
@@ -76,9 +100,11 @@ pub struct CustomDestReceiver {
     pub rDestroy: Option<unsafe extern "C" fn(self_: *mut DestReceiver)>,
     pub mydest: CommandDest,
     pub original_dest: Option<*mut DestReceiver>,
+    pub column: String,
+    pub values: Vec<String>,
 }
 
-pub const fn create_custom_dest_receiver() -> CustomDestReceiver {
+pub fn create_custom_dest_receiver(column: &str) -> CustomDestReceiver {
     CustomDestReceiver {
         receiveSlot: Some(receive),
         rStartup: Some(startup),
@@ -86,6 +112,8 @@ pub const fn create_custom_dest_receiver() -> CustomDestReceiver {
         rDestroy: Some(destroy),
         mydest: CommandDest_DestNone,
         original_dest: None,
+        column: String::from(column),
+        values: Vec::new(),
     }
 }
 
@@ -104,6 +132,7 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
         let attrs = tinfo.attrs.as_slice(nattrs);
         let mut typoutput: Oid = Oid::default();
         let mut typvarlena: bool = false;
+        let custom_receiver = &mut *custom_receiver;
         for i in 0..nattrs {
             let attr = slot_getattr(slot, i+1);
             if attr.is_none() {
@@ -117,11 +146,11 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
             let value = value
                 .to_str()
                 .expect("Failed to convert Postgres query string for rust");
-            println!("r\t{i}: = \"{value}\" {}\t(typeid = {}, len = {}, typmod = {}, byval = {})", 
-                    attrs[i].name(), attrs[i].atttypid.as_u32(),
-                    attrs[i].attlen, attrs[i].type_mod(), attrs[i].attbyval);
+            if attrs[i].name() == custom_receiver.column {
+                custom_receiver.values.push(String::from(value));
+            }
         }
-        let custom_receiver = *custom_receiver;
+        let custom_receiver = &*custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.receiveSlot {
             r(slot, custom_receiver.original_dest.unwrap());
@@ -139,15 +168,7 @@ pub extern "C" fn startup(receiver: *mut DestReceiver, operation: c_int, typeinf
     );
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
-        let tinfo = &(*typeinfo);
-        let nattrs = tinfo.natts as usize;
-        let attrs = tinfo.attrs.as_slice(nattrs);
-        for i in 0..nattrs {
-            println!("s\t{i}: {}\t(typeid = {}, len = {}, typmod = {}, byval = {})", 
-                    attrs[i].name(), attrs[i].atttypid.as_u32(),
-                    attrs[i].attlen, attrs[i].type_mod(), attrs[i].attbyval);
-        }
-        let custom_receiver = *custom_receiver;
+        let custom_receiver = &*custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.rStartup {
             r(custom_receiver.original_dest.unwrap(), operation, typeinfo);
@@ -158,7 +179,7 @@ pub extern "C" fn startup(receiver: *mut DestReceiver, operation: c_int, typeinf
 pub extern "C" fn shutdown(receiver: *mut DestReceiver) {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
-        let custom_receiver = *custom_receiver;
+        let custom_receiver = &*custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.rShutdown {
             r(custom_receiver.original_dest.unwrap());
@@ -169,7 +190,7 @@ pub extern "C" fn shutdown(receiver: *mut DestReceiver) {
 pub extern "C" fn destroy(receiver: *mut DestReceiver) {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
-        let custom_receiver = *custom_receiver;
+        let custom_receiver = &*custom_receiver;
         let original_receiver = *(custom_receiver.original_dest.unwrap());
         if let Some(r) = original_receiver.rDestroy {
             r(custom_receiver.original_dest.unwrap());
