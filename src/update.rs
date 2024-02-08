@@ -49,12 +49,12 @@ pub fn handle_update(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
 
         if !result_rel_info.is_null() {
             let relation_rel = *result_rel_info;
-            let relation_desc = (*relation_rel).ri_RelationDesc;
+            let relation_desc = relation_rel.ri_RelationDesc;
 
             // let tuple_old_slot: *mut pgrx::prelude::pg_sys::TupleTableSlot =
             //     ((*relation_rel).ri_oldTupleSlot);
 
-            let tuple_new_slot = *((*relation_rel).ri_newTupleSlot);
+            let tuple_new_slot = *(relation_rel.ri_TrigNewSlot);
 
             if relation_desc.is_null() {
                 let s = format!("PostgresRedis > relation_desc is null");

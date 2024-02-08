@@ -17,6 +17,7 @@ pg16 = ["pgrx/pg16", "pgrx-tests/pg16" ]
 pg_test = []
 
 [dependencies]
+heapless = "0.7.17"
 pgrx = "=0.11.2"
 regex = "1.10.3"
 
