@@ -4,7 +4,7 @@ use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
-use prshmem::{vec_push, Info, init_vec, vec_drain};
+use prshmem::{add_item, Info, init_redis_buffer, move_redis_data};
 
 pub mod select;
 pub mod update;
@@ -89,7 +89,7 @@ impl PgHooks for PRHook {
                 content[i] = c;
             }
             let info = Info {content, length: s.len() as u8};
-            vec_push(info);
+            add_item(info);
         }
         self.custom_receiver = None;
     }
@@ -113,7 +113,7 @@ unsafe fn init_hook() {
 
 #[pg_guard]
 pub unsafe extern "C" fn _PG_init() {
-    init_vec();
+    init_redis_buffer();
     init_hook();
     BackgroundWorkerBuilder::new("PGRedis Experiment")
         .set_function("postgres_redis_background")
@@ -131,7 +131,7 @@ pub extern "C" fn postgres_redis_background() {
     );
 
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
-        let results = vec_drain();
+        let results = move_redis_data();
         for i in results.iter() {
             let s = &i.content[0..i.length as usize];
             let s2: String = s.iter().collect();

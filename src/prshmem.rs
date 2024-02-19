@@ -9,24 +9,24 @@ pub struct Info {
 
 unsafe impl PGRXSharedMemory for Info {}
 
-pub static VEC: PgLwLock<heapless::Vec<Info, 400>> = PgLwLock::new();
+pub static REDIS_BUFFER: PgLwLock<heapless::Vec<Info, 400>> = PgLwLock::new();
 
-pub fn vec_drain() -> Vec<Info> {
-    let mut vec = VEC.exclusive();
+pub fn move_redis_data() -> Vec<Info> {
+    let mut vec = REDIS_BUFFER.exclusive();
     let r = vec.iter().copied().collect::<Vec<Info>>();
     vec.clear();
     r
 }
 
-pub fn vec_count() -> i32 {
-    VEC.share().len() as i32
+pub fn data_size() -> i32 {
+    REDIS_BUFFER.share().len() as i32
 }
 
-pub fn vec_push(item: Info) {
-    VEC.exclusive().push(item).unwrap_or_else(|_| warning!("Vector is full, discarding update"));
+pub fn add_item(item: Info) {
+    REDIS_BUFFER.exclusive().push(item).unwrap_or_else(|_| warning!("Vector is full, discarding update"));
 }
 
 #[pg_guard]
-pub fn init_vec() {
-    pg_shmem_init!(VEC);
+pub fn init_redis_buffer() {
+    pg_shmem_init!(REDIS_BUFFER);
 }
