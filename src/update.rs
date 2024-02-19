@@ -71,7 +71,7 @@ pub fn handle_update(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
 
         if expected_table {
             let result_rel_info = estate.es_result_relations;
-
+          
             if !result_rel_info.is_null() {
                 let relation_rel = *result_rel_info;
                 let relation_desc = (*relation_rel).ri_RelationDesc;
