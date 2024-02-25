@@ -3,46 +3,51 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
+use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
-use prshmem::{add_item, Info, init_redis_buffer, move_redis_data};
+use update::UpdateDestReceiver;
 
+pub mod prshmem;
 pub mod select;
 pub mod update;
-pub mod prshmem;
 
 pgrx::pg_module_magic!();
 
 struct PRHook {
     custom_receiver: Option<CustomDestReceiver>,
     table: Option<String>,
+    update_receiver: Option<UpdateDestReceiver>,
 }
 
 impl PgHooks for PRHook {
     fn executor_start(
-            &mut self,
-            query_desc: PgBox<pg_sys::QueryDesc>,
-            eflags: i32,
-            prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>, eflags: i32) -> HookResult<()>,
-        ) -> HookResult<()> {
+        &mut self,
+        query_desc: PgBox<pg_sys::QueryDesc>,
+        eflags: i32,
+        prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>, eflags: i32) -> HookResult<()>,
+    ) -> HookResult<()> {
         self.table = Some(String::from("test"));
         prev_hook(query_desc, eflags)
     }
     fn executor_run(
-            &mut self,
+        &mut self,
+        query_desc: PgBox<pg_sys::QueryDesc>,
+        direction: pg_sys::ScanDirection,
+        count: u64,
+        execute_once: bool,
+        prev_hook: fn(
             query_desc: PgBox<pg_sys::QueryDesc>,
             direction: pg_sys::ScanDirection,
             count: u64,
             execute_once: bool,
-            prev_hook: fn(
-                query_desc: PgBox<pg_sys::QueryDesc>,
-                direction: pg_sys::ScanDirection,
-                count: u64,
-                execute_once: bool,
-            ) -> pgrx::HookResult<()>,
-        ) -> pgrx::HookResult<()> {
+        ) -> pgrx::HookResult<()>,
+    ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
-        if op == CmdType_CMD_SELECT && select::is_contain_table(&query_desc, self.table.as_ref().unwrap()) {
-            let mut custom_receiver: CustomDestReceiver = create_custom_dest_receiver("description");
+        if op == CmdType_CMD_SELECT
+            && select::is_contain_table(&query_desc, self.table.as_ref().unwrap())
+        {
+            let mut custom_receiver: CustomDestReceiver =
+                create_custom_dest_receiver("description");
             custom_receiver.original_dest = Some(query_desc.dest);
             let new_query_desc;
             unsafe {
@@ -71,37 +76,74 @@ impl PgHooks for PRHook {
         if op == CmdType_CMD_SELECT {
             select::handle_select(&query_desc, "test", &self.custom_receiver);
         } else if op == CmdType_CMD_UPDATE {
-            update::handle_update(&query_desc, "users");
+            let mut new_update_receiver = UpdateDestReceiver {
+                values: vec![],
+                column: String::new(),
+            };
+            update::handle_update(&query_desc, "test", "description", &mut new_update_receiver);
+            self.update_receiver = Some(new_update_receiver);
         }
         prev_hook(query_desc)
     }
 
     fn commit(&mut self) {
-        if self.custom_receiver.is_none() {
-            return;
-        }
-        let custom_receiver = self.custom_receiver.as_ref().unwrap();
-        if custom_receiver.values.len() > 0 {
-            let t = custom_receiver.values.join(", ");
-            let s = format!("PostgresRedis > The values of column {} in table {} are {t}", custom_receiver.column, self.table.as_ref().unwrap());
-            let mut content = [' '; 255];
-            for (i, c) in s.chars().enumerate() {
-                content[i] = c;
+        if !self.custom_receiver.is_none() {
+            let custom_receiver = self.custom_receiver.as_ref().unwrap();
+            if custom_receiver.values.len() > 0 {
+                let t = custom_receiver.values.join(", ");
+                let s = format!(
+                    "PostgresRedis > The values of column {} in table {} are {t}",
+                    custom_receiver.column,
+                    self.table.as_ref().unwrap()
+                );
+                let mut content = [' '; 255];
+                for (i, c) in s.chars().enumerate() {
+                    content[i] = c;
+                }
+                let info = Info {
+                    content,
+                    length: s.len() as u8,
+                };
+                add_item(info);
             }
-            let info = Info {content, length: s.len() as u8};
-            add_item(info);
+            self.custom_receiver = None;
+        } else if !self.update_receiver.is_none() {
+            let update_receiver = self.update_receiver.as_ref().unwrap();
+            if update_receiver.values.len() > 0 {
+                let t = update_receiver.values.join(", ");
+                let s = format!(
+                    "PostgresRedis > The values updated of column {} in table {} are {t}",
+                    update_receiver.column,
+                    self.table.as_ref().unwrap()
+                );
+                let mut content = [' '; 255];
+                for (i, c) in s.chars().enumerate() {
+                    content[i] = c;
+                }
+                let info = Info {
+                    content,
+                    length: s.len() as u8,
+                };
+                add_item(info);
+            }
+            self.update_receiver = None;
         }
-        self.custom_receiver = None;
     }
 
     fn abort(&mut self) {
         if self.custom_receiver.is_some() {
             self.custom_receiver = None;
+        } else if self.update_receiver.is_some() {
+            self.update_receiver = None;
         }
     }
 }
 
-static mut HOOK: PRHook = PRHook {custom_receiver: None, table: None};
+static mut HOOK: PRHook = PRHook {
+    custom_receiver: None,
+    table: None,
+    update_receiver: None,
+};
 
 #[pg_extern]
 fn hello_postgres_redis() -> &'static str {
@@ -127,7 +169,8 @@ pub unsafe extern "C" fn _PG_init() {
 pub extern "C" fn postgres_redis_background() {
     BackgroundWorker::attach_signal_handlers(SignalWakeFlags::SIGHUP | SignalWakeFlags::SIGTERM);
     log!(
-        "Hello from inside the {} BGWorker", BackgroundWorker::get_name()
+        "Hello from inside the {} BGWorker",
+        BackgroundWorker::get_name()
     );
 
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
