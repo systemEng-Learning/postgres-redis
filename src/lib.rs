@@ -1,15 +1,21 @@
 use std::time::Duration;
 
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
-use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
-use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
+use pgrx::is_a;
+use pgrx::pg_sys::{
+    eval_const_expressions, getTypeOutputInfo, get_attname, nodeToString, rt_fetch,
+    CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver, Node, Oid, OidOutputFunctionCall, OpExpr,
+    PgNode,
+};
+use pgrx::{prelude::*, register_hook, void_ptr, HookResult, PgHooks};
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
+use std::ffi::CStr;
 use update::UpdateDestReceiver;
-
 pub mod prshmem;
 pub mod select;
 pub mod update;
+use pgrx::pg_sys::NodeTag::T_OpExpr;
 
 pgrx::pg_module_magic!();
 
@@ -17,9 +23,88 @@ struct PRHook {
     custom_receiver: Option<CustomDestReceiver>,
     table: Option<String>,
     update_receiver: Option<UpdateDestReceiver>,
+    where_cluase_receiver: Option<UpdateDestReceiver>,
 }
 
 impl PgHooks for PRHook {
+    fn planner(
+        &mut self,
+        parse: PgBox<pg_sys::Query>,
+        query_string: *const std::os::raw::c_char,
+        cursor_options: i32,
+        bound_params: PgBox<pg_sys::ParamListInfoData>,
+        prev_hook: fn(
+            parse: PgBox<pg_sys::Query>,
+            query_string: *const std::os::raw::c_char,
+            cursor_options: i32,
+            bound_params: PgBox<pg_sys::ParamListInfoData>,
+        ) -> HookResult<*mut pg_sys::PlannedStmt>,
+    ) -> HookResult<*mut pg_sys::PlannedStmt> {
+        unsafe {
+            let jointree = *(parse.jointree);
+
+            let quals: *mut pg_sys::Node = (jointree.quals);
+            let quals_node = eval_const_expressions(std::ptr::null_mut(), quals.cast());
+            if is_a(quals_node.cast(), T_OpExpr) {
+                let op_expr_pointer = quals_node.cast::<OpExpr>();
+                let op_expr = *op_expr_pointer;
+                let op_number = Oid::from(416);
+
+                if op_expr.opno == op_number {
+                    let args = op_expr.args;
+                    let argg = args.as_ref().unwrap();
+                    let first_cell = argg.elements.add(0);
+                    let first_value = first_cell.as_ref().unwrap().ptr_value;
+                    let second_cell = argg.elements.add(1);
+                    let second_value = second_cell.as_ref().unwrap().ptr_value;
+                    let first_node = first_value.cast::<Node>();
+                    let second_node = second_value.cast::<Node>();
+
+                    if is_a(first_node.cast(), pg_sys::NodeTag::T_Var)
+                        && is_a(second_node.cast(), pg_sys::NodeTag::T_Const)
+                    {
+                        let var: *mut pg_sys::Var = first_node.cast::<pg_sys::Var>();
+                        let constt: *mut pg_sys::Const = second_node.cast::<pg_sys::Const>();
+                        let var_attid: i16 = var.as_ref().unwrap().varattno;
+                        let varno = var.as_ref().unwrap().varno;
+
+                        let rte = rt_fetch(varno, parse.rtable);
+                        let rte_relid = rte.as_ref().unwrap().relid;
+                        let rte_name = get_attname(rte_relid, var_attid, true);
+                        let rte_name_str = CStr::from_ptr(rte_name).to_str().unwrap();
+
+                        let consstt = constt.as_ref().unwrap();
+                        let const_cons = consstt.constvalue;
+                        let const_type = consstt.consttype;
+                        let mut foutoid: Oid = Oid::default();
+                        let mut typisvarlena: bool = false;
+                        getTypeOutputInfo(const_type, &mut foutoid, &mut typisvarlena);
+                        let const_type_output = OidOutputFunctionCall(foutoid, const_cons);
+                        let qual_value = CStr::from_ptr(const_type_output)
+                            .to_str()
+                            .expect("Failed to convert Postgres query string for rust");
+                        let s = format!(
+                            "PostgresRedis > The query qual is  {rte_name_str} =  {qual_value}"
+                        );
+                        ereport!(
+                            PgLogLevel::NOTICE,
+                            PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
+                            s
+                        );
+
+                        // save in where_cluase_receiver for later use
+                        let where_cluase_receiver = UpdateDestReceiver {
+                            values: vec![qual_value.to_string()],
+                            column: String::from(rte_name_str),
+                        };
+
+                        self.where_cluase_receiver = Some(where_cluase_receiver);
+                    }
+                }
+            }
+        }
+        prev_hook(parse, query_string, cursor_options, bound_params)
+    }
     fn executor_start(
         &mut self,
         query_desc: PgBox<pg_sys::QueryDesc>,
@@ -143,6 +228,7 @@ static mut HOOK: PRHook = PRHook {
     custom_receiver: None,
     table: None,
     update_receiver: None,
+    where_cluase_receiver: None,
 };
 
 #[pg_extern]
