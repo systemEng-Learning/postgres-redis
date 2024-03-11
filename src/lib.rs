@@ -3,11 +3,10 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::is_a;
 use pgrx::pg_sys::{
-    eval_const_expressions, getTypeOutputInfo, get_attname, nodeToString, rt_fetch,
-    CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver, Node, Oid, OidOutputFunctionCall, OpExpr,
-    PgNode,
+    eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, CmdType_CMD_SELECT,
+    CmdType_CMD_UPDATE, DestReceiver, Node, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator,
 };
-use pgrx::{prelude::*, register_hook, void_ptr, HookResult, PgHooks};
+use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 use std::ffi::CStr;
@@ -23,7 +22,7 @@ struct PRHook {
     custom_receiver: Option<CustomDestReceiver>,
     table: Option<String>,
     update_receiver: Option<UpdateDestReceiver>,
-    where_cluase_receiver: Option<UpdateDestReceiver>,
+    where_clause_receiver: Option<(String, String)>,
 }
 
 impl PgHooks for PRHook {
@@ -43,26 +42,31 @@ impl PgHooks for PRHook {
         unsafe {
             let jointree = *(parse.jointree);
 
-            let quals: *mut pg_sys::Node = (jointree.quals);
+            let quals: *mut pg_sys::Node = jointree.quals;
             let quals_node = eval_const_expressions(std::ptr::null_mut(), quals.cast());
             if is_a(quals_node.cast(), T_OpExpr) {
                 let op_expr_pointer = quals_node.cast::<OpExpr>();
                 let op_expr = *op_expr_pointer;
                 let op_number = Oid::from(416);
 
-                if op_expr.opno == op_number {
+                if op_expr.opno == op_number || op_expr.opno == Oid::from(TextEqualOperator) {
                     let args = op_expr.args;
                     let argg = args.as_ref().unwrap();
                     let first_cell = argg.elements.add(0);
                     let first_value = first_cell.as_ref().unwrap().ptr_value;
                     let second_cell = argg.elements.add(1);
                     let second_value = second_cell.as_ref().unwrap().ptr_value;
-                    let first_node = first_value.cast::<Node>();
+                    let mut first_node = first_value.cast::<Node>();
                     let second_node = second_value.cast::<Node>();
 
-                    if is_a(first_node.cast(), pg_sys::NodeTag::T_Var)
+                    if (is_a(first_node.cast(), pg_sys::NodeTag::T_Var)
+                        || is_a(first_node.cast(), pg_sys::NodeTag::T_RelabelType))
                         && is_a(second_node.cast(), pg_sys::NodeTag::T_Const)
                     {
+                        if is_a(first_node.cast(), pg_sys::NodeTag::T_RelabelType) {
+                            let relabel = first_node.cast::<pg_sys::RelabelType>();
+                            first_node = (*relabel).arg.cast::<pg_sys::Node>();
+                        }
                         let var: *mut pg_sys::Var = first_node.cast::<pg_sys::Var>();
                         let constt: *mut pg_sys::Const = second_node.cast::<pg_sys::Const>();
                         let var_attid: i16 = var.as_ref().unwrap().varattno;
@@ -93,12 +97,10 @@ impl PgHooks for PRHook {
                         );
 
                         // save in where_cluase_receiver for later use
-                        let where_cluase_receiver = UpdateDestReceiver {
-                            values: vec![qual_value.to_string()],
-                            column: String::from(rte_name_str),
-                        };
+                        let where_clause_receiver =
+                            (String::from(rte_name_str), qual_value.to_string());
 
-                        self.where_cluase_receiver = Some(where_cluase_receiver);
+                        self.where_clause_receiver = Some(where_clause_receiver);
                     }
                 }
             }
@@ -172,7 +174,7 @@ impl PgHooks for PRHook {
     }
 
     fn commit(&mut self) {
-        if !self.custom_receiver.is_none() {
+        if self.custom_receiver.is_some() {
             let custom_receiver = self.custom_receiver.as_ref().unwrap();
             if custom_receiver.values.len() > 0 {
                 let t = custom_receiver.values.join(", ");
@@ -192,7 +194,7 @@ impl PgHooks for PRHook {
                 add_item(info);
             }
             self.custom_receiver = None;
-        } else if !self.update_receiver.is_none() {
+        } else if self.update_receiver.is_some() {
             let update_receiver = self.update_receiver.as_ref().unwrap();
             if update_receiver.values.len() > 0 {
                 let t = update_receiver.values.join(", ");
@@ -213,12 +215,24 @@ impl PgHooks for PRHook {
             }
             self.update_receiver = None;
         }
+
+        if self.where_clause_receiver.is_some() {
+            let where_clause = self.where_clause_receiver.as_ref().unwrap();
+            notice!(
+                "PostgresRedis > The value of where clause for column {} is {}",
+                where_clause.0,
+                where_clause.1
+            );
+            self.where_clause_receiver = None;
+        }
     }
 
     fn abort(&mut self) {
         if self.custom_receiver.is_some() {
             self.custom_receiver = None;
-        } else if self.update_receiver.is_some() {
+        }
+
+        if self.update_receiver.is_some() {
             self.update_receiver = None;
         }
     }
@@ -228,7 +242,7 @@ static mut HOOK: PRHook = PRHook {
     custom_receiver: None,
     table: None,
     update_receiver: None,
-    where_cluase_receiver: None,
+    where_clause_receiver: None,
 };
 
 #[pg_extern]
