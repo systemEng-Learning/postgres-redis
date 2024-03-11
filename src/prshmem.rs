@@ -1,5 +1,4 @@
-use pgrx::{pg_guard, pg_shmem_init, warning, PGRXSharedMemory, PgLwLock, prelude::*, shmem::*};
-
+use pgrx::{pg_guard, pg_shmem_init, prelude::*, shmem::*, warning, PGRXSharedMemory, PgLwLock};
 
 #[derive(Copy, Clone)]
 pub struct Info {
@@ -23,7 +22,10 @@ pub fn data_size() -> i32 {
 }
 
 pub fn add_item(item: Info) {
-    REDIS_BUFFER.exclusive().push(item).unwrap_or_else(|_| warning!("Vector is full, discarding update"));
+    REDIS_BUFFER
+        .exclusive()
+        .push(item)
+        .unwrap_or_else(|_| warning!("Vector is full, discarding update"));
 }
 
 #[pg_guard]

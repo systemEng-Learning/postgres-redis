@@ -1,11 +1,18 @@
 use pgrx::{
-    pg_sys::{self, getTypeOutputInfo, rt_fetch, slot_getsomeattrs_int, CommandDest, CommandDest_DestNone, Datum, DestReceiver, Oid, OidOutputFunctionCall, TupleDesc, TupleTableSlot, RELKIND_RELATION},
+    pg_sys::{
+        self, getTypeOutputInfo, slot_getsomeattrs_int, CommandDest, CommandDest_DestNone, Datum,
+        DestReceiver, Oid, OidOutputFunctionCall, TupleDesc, TupleTableSlot,
+    },
     prelude::*,
 };
 use std::ffi::CStr;
 use std::os::raw::c_int;
 
-pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str, custom_receiver: &Option<CustomDestReceiver>) {
+pub fn handle_select(
+    query_desc: &PgBox<pg_sys::QueryDesc>,
+    expected_table_name: &str,
+    custom_receiver: &Option<CustomDestReceiver>,
+) {
     let raw_query_string = unsafe { CStr::from_ptr(query_desc.sourceText) };
     let query_string = raw_query_string
         .to_str()
@@ -45,7 +52,10 @@ pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
         let custom_receiver = custom_receiver.as_ref().unwrap();
         if custom_receiver.values.len() > 0 {
             let t = custom_receiver.values.join(", ");
-            let s = format!("PostgresRedis > The values of column {} in table {expected_table_name} are {t}", custom_receiver.column);
+            let s = format!(
+                "PostgresRedis > The values of column {} in table {expected_table_name} are {t}",
+                custom_receiver.column
+            );
             ereport!(
                 PgLogLevel::NOTICE,
                 PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
@@ -55,46 +65,14 @@ pub fn handle_select(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name:
     }
 }
 
-pub fn is_contain_table(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str) -> bool {
-    let mut result = false;
-    unsafe {
-        let p = *(query_desc.plannedstmt);
-
-        let table_lists = p.rtable;
-        let mut length = 0;
-        if !table_lists.is_null() {
-            length = table_lists.as_ref().unwrap().length;
-        }
-        for i in 1..=length {
-            let table_entry = *rt_fetch(i as u32, table_lists);
-            if table_entry.relkind as u8 != RELKIND_RELATION {
-                continue;
-            }
-            let table_data = *table_entry.eref;
-            let name = CStr::from_ptr(table_data.aliasname);
-            let name = name
-                .to_str()
-                .expect("Failed to convert Postgres query string for rust");
-            if name == expected_table_name {
-                result = true;
-                break;
-            }
-        }
-    }
-    result
-}
-
 #[repr(C)]
 #[allow(non_snake_case)]
 #[derive(Debug, Clone)]
 pub struct CustomDestReceiver {
-    pub receiveSlot: Option<unsafe extern "C" fn(_: *mut TupleTableSlot, _: *mut DestReceiver) -> bool>,
+    pub receiveSlot:
+        Option<unsafe extern "C" fn(_: *mut TupleTableSlot, _: *mut DestReceiver) -> bool>,
     pub rStartup: Option<
-        unsafe extern "C" fn(
-            self_: *mut DestReceiver,
-            operation: c_int,
-            typeinfo: TupleDesc,
-        ),
+        unsafe extern "C" fn(self_: *mut DestReceiver, operation: c_int, typeinfo: TupleDesc),
     >,
     pub rShutdown: Option<unsafe extern "C" fn(self_: *mut DestReceiver)>,
     pub rDestroy: Option<unsafe extern "C" fn(self_: *mut DestReceiver)>,
@@ -134,13 +112,16 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
         let mut typvarlena: bool = false;
         let custom_receiver = &mut *custom_receiver;
         for i in 0..nattrs {
-            let attr = slot_getattr(slot, i+1);
+            let attr = slot_getattr(slot, i + 1);
             if attr.is_none() {
                 continue;
             }
             let attr = attr.unwrap();
-            getTypeOutputInfo(attrs[i].atttypid, 
-                &mut typoutput as *mut Oid, &mut typvarlena as *mut bool);
+            getTypeOutputInfo(
+                attrs[i].atttypid,
+                &mut typoutput as *mut Oid,
+                &mut typvarlena as *mut bool,
+            );
             let value = OidOutputFunctionCall(typoutput, attr);
             let value = CStr::from_ptr(value);
             let value = value
@@ -200,15 +181,15 @@ pub extern "C" fn destroy(receiver: *mut DestReceiver) {
 
 unsafe fn slot_getattr(slot: *mut TupleTableSlot, attnum: usize) -> Option<Datum> {
     let real_slot = &(*slot);
-    if attnum as i16 > real_slot.tts_nvalid  {
+    if attnum as i16 > real_slot.tts_nvalid {
         slot_getsomeattrs_int(slot, attnum as i32);
     }
 
-    let is_null = *real_slot.tts_isnull.offset(attnum as isize-1);
+    let is_null = *real_slot.tts_isnull.offset(attnum as isize - 1);
 
     if is_null {
         return None;
     }
-	let datum = *real_slot.tts_values.offset(attnum as isize - 1);
+    let datum = *real_slot.tts_values.offset(attnum as isize - 1);
     Some(datum)
 }
