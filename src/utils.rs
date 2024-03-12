@@ -2,9 +2,9 @@ use std::ffi::CStr;
 
 use pgrx::{
     is_a, notice,
+    list,
     pg_sys::{
-        self, eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, FromExpr, List,
-        Node, NodeTag, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator,
+        self, eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, BoolExpr, FromExpr, List, Node, NodeTag, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator
     },
 };
 
@@ -15,8 +15,31 @@ pub unsafe fn get_where_object(
     let jointree = *jointree;
     let quals: *mut pg_sys::Node = jointree.quals;
     let quals_node = eval_const_expressions(std::ptr::null_mut(), quals.cast());
+    let mut opexprs = vec![];
+    let mut boolexprs = vec![];
+    let mut result = None;
     if is_a(quals_node.cast(), NodeTag::T_OpExpr) {
-        let op_expr_pointer = quals_node.cast::<OpExpr>();
+        opexprs.push(quals_node.cast::<OpExpr>());
+    } 
+    if is_a(quals_node.cast(), NodeTag::T_BoolExpr) {
+        boolexprs.push(quals_node.cast::<BoolExpr>());
+    }
+    while let Some(boolexpr) = boolexprs.pop() {
+        let args = (*boolexpr).args;
+        let l = &(*args);
+        for i in 0..l.length {
+            let f = node_fetch(args, i as usize);
+            let t = f.cast::<Node>();
+            if is_a(t.cast(), NodeTag::T_OpExpr) {
+                opexprs.push(t.cast::<OpExpr>());
+            } else if is_a(t.cast(), NodeTag::T_BoolExpr) {
+                boolexprs.push(t.cast::<BoolExpr>());
+            } 
+        }        
+    }
+
+    for node in opexprs {
+        let op_expr_pointer = node.cast::<OpExpr>();
         let op_expr = *op_expr_pointer;
         let op_number = Oid::from(416);
 
@@ -58,12 +81,20 @@ pub unsafe fn get_where_object(
                     .to_str()
                     .expect("Failed to convert Postgres query string for rust");
                 let s =
-                    format!("PostgresRedis > The query qual is  {rte_name_str} =  {qual_value}");
+                    format!("PostgresRedis > The query qual is  {rte_name_str} = {qual_value}");
                 notice!("{s}");
 
-                return Some((String::from(rte_name_str), qual_value.to_string()));
+                result = Some((String::from(rte_name_str), qual_value.to_string()));
             }
         }
     }
-    None
+    result
+}
+
+unsafe fn node_fetch(range_table: *mut List, index: usize) -> *mut Node {
+    list::List::<*mut core::ffi::c_void>::downcast_ptr(range_table)
+        .expect("node_fetch used on non-ptr List")
+        .get(index)
+        .expect("node_fetch used out-of-bounds")
+        .cast()
 }
