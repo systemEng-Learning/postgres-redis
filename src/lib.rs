@@ -15,9 +15,12 @@ pgrx::pg_module_magic!();
 
 struct PRHook {
     custom_receiver: Option<CustomDestReceiver>,
-    table: Option<String>,
     update_receiver: Option<UpdateDestReceiver>,
     where_clause_receiver: Option<(String, String)>,
+    table: Option<String>,
+    key_column: Option<String>,
+    value_column: Option<String>,
+    keep_running: bool,
 }
 
 impl PgHooks for PRHook {
@@ -34,8 +37,20 @@ impl PgHooks for PRHook {
             bound_params: PgBox<pg_sys::ParamListInfoData>,
         ) -> HookResult<*mut pg_sys::PlannedStmt>,
     ) -> HookResult<*mut pg_sys::PlannedStmt> {
+        self.keep_running = utils::is_contain_table(parse.rtable, self.table.as_ref().unwrap());
+        if !self.keep_running {
+            return prev_hook(parse, query_string, cursor_options, bound_params);
+        }
         unsafe {
-            self.where_clause_receiver = utils::get_where_object(parse.jointree, parse.rtable);
+            self.where_clause_receiver = utils::get_where_object(
+                parse.jointree,
+                parse.rtable,
+                self.table.as_ref().unwrap(),
+                self.key_column.as_ref().unwrap(),
+            );
+        }
+        if self.where_clause_receiver.is_none() {
+            self.keep_running = false;
         }
         prev_hook(parse, query_string, cursor_options, bound_params)
     }
@@ -45,7 +60,6 @@ impl PgHooks for PRHook {
         eflags: i32,
         prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>, eflags: i32) -> HookResult<()>,
     ) -> HookResult<()> {
-        self.table = Some(String::from("test"));
         prev_hook(query_desc, eflags)
     }
     fn executor_run(
@@ -62,11 +76,9 @@ impl PgHooks for PRHook {
         ) -> pgrx::HookResult<()>,
     ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
-        if op == CmdType_CMD_SELECT
-            && select::is_contain_table(&query_desc, self.table.as_ref().unwrap())
-        {
+        if op == CmdType_CMD_SELECT && self.keep_running {
             let mut custom_receiver: CustomDestReceiver =
-                create_custom_dest_receiver("description");
+                create_custom_dest_receiver(self.value_column.as_ref().unwrap());
             custom_receiver.original_dest = Some(query_desc.dest);
             let new_query_desc;
             unsafe {
@@ -91,15 +103,27 @@ impl PgHooks for PRHook {
         query_desc: PgBox<pg_sys::QueryDesc>,
         prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>) -> pgrx::HookResult<()>,
     ) -> pgrx::HookResult<()> {
+        if !self.keep_running {
+            return prev_hook(query_desc);
+        }
         let op = query_desc.operation;
         if op == CmdType_CMD_SELECT {
-            select::handle_select(&query_desc, "test", &self.custom_receiver);
+            select::handle_select(
+                &query_desc,
+                self.table.as_ref().unwrap(),
+                &self.custom_receiver,
+            );
         } else if op == CmdType_CMD_UPDATE {
             let mut new_update_receiver = UpdateDestReceiver {
-                values: vec![],
+                value: None,
                 column: String::new(),
             };
-            update::handle_update(&query_desc, "test", "description", &mut new_update_receiver);
+            update::handle_update(
+                &query_desc,
+                self.table.as_ref().unwrap(),
+                self.value_column.as_ref().unwrap(),
+                &mut new_update_receiver,
+            );
             self.update_receiver = Some(new_update_receiver);
         }
         prev_hook(query_desc)
@@ -108,42 +132,28 @@ impl PgHooks for PRHook {
     fn commit(&mut self) {
         if self.custom_receiver.is_some() {
             let custom_receiver = self.custom_receiver.as_ref().unwrap();
-            if custom_receiver.values.len() > 0 {
-                let t = custom_receiver.values.join(", ");
-                let s = format!(
+            let key_string = &(self.where_clause_receiver.as_ref().unwrap().1);
+            if custom_receiver.value.is_some() {
+                let t = custom_receiver.value.as_ref().unwrap();
+                notice!(
                     "PostgresRedis > The values of column {} in table {} are {t}",
                     custom_receiver.column,
                     self.table.as_ref().unwrap()
                 );
-                let mut content = [' '; 255];
-                for (i, c) in s.chars().enumerate() {
-                    content[i] = c;
-                }
-                let info = Info {
-                    content,
-                    length: s.len() as u8,
-                };
-                add_item(info);
+                add_item(Info::new(key_string, t));
             }
             self.custom_receiver = None;
         } else if self.update_receiver.is_some() {
             let update_receiver = self.update_receiver.as_ref().unwrap();
-            if update_receiver.values.len() > 0 {
-                let t = update_receiver.values.join(", ");
-                let s = format!(
+            let key_string = &(self.where_clause_receiver.as_ref().unwrap().1);
+            if update_receiver.value.is_some() {
+                let t = update_receiver.value.as_ref().unwrap();
+                notice!(
                     "PostgresRedis > The values updated of column {} in table {} are {t}",
                     update_receiver.column,
                     self.table.as_ref().unwrap()
                 );
-                let mut content = [' '; 255];
-                for (i, c) in s.chars().enumerate() {
-                    content[i] = c;
-                }
-                let info = Info {
-                    content,
-                    length: s.len() as u8,
-                };
-                add_item(info);
+                add_item(Info::new(key_string, t));
             }
             self.update_receiver = None;
         }
@@ -157,6 +167,7 @@ impl PgHooks for PRHook {
             );
             self.where_clause_receiver = None;
         }
+        self.keep_running = true;
     }
 
     fn abort(&mut self) {
@@ -167,14 +178,22 @@ impl PgHooks for PRHook {
         if self.update_receiver.is_some() {
             self.update_receiver = None;
         }
+
+        if self.where_clause_receiver.is_some() {
+            self.where_clause_receiver = None;
+        }
+        self.keep_running = true;
     }
 }
 
 static mut HOOK: PRHook = PRHook {
     custom_receiver: None,
-    table: None,
     update_receiver: None,
     where_clause_receiver: None,
+    table: None,
+    key_column: None,
+    value_column: None,
+    keep_running: true,
 };
 
 #[pg_extern]
@@ -182,6 +201,9 @@ fn hello_postgres_redis() -> &'static str {
     "Hello, postgres_redis"
 }
 unsafe fn init_hook() {
+    HOOK.table = Some(String::from("test"));
+    HOOK.key_column = Some(String::from("title"));
+    HOOK.value_column = Some(String::from("description"));
     register_hook(&mut HOOK);
 }
 
@@ -208,9 +230,9 @@ pub extern "C" fn postgres_redis_background() {
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
         let results = move_redis_data();
         for i in results.iter() {
-            let s = &i.content[0..i.length as usize];
-            let s2: String = s.iter().collect();
-            log!("From bg: {s2}");
+            let key: String = i.key[0..i.key_length as usize].iter().collect();
+            let value: String = i.value[0..i.value_length as usize].iter().collect();
+            log!("From bg: {key} => {value}");
         }
     }
 }

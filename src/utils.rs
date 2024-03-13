@@ -1,16 +1,19 @@
 use std::ffi::CStr;
 
 use pgrx::{
-    is_a, notice,
-    list,
+    is_a, list, notice,
     pg_sys::{
-        self, eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, BoolExpr, FromExpr, List, Node, NodeTag, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator
+        self, eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, BoolExpr, FromExpr,
+        List, Node, NodeTag, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator,
+        RELKIND_RELATION,
     },
 };
 
 pub unsafe fn get_where_object(
     jointree: *mut FromExpr,
     range_table: *mut List,
+    table_name: &str,
+    key_column_name: &str,
 ) -> Option<(String, String)> {
     let jointree = *jointree;
     let quals: *mut pg_sys::Node = jointree.quals;
@@ -20,7 +23,7 @@ pub unsafe fn get_where_object(
     let mut result = None;
     if is_a(quals_node.cast(), NodeTag::T_OpExpr) {
         opexprs.push(quals_node.cast::<OpExpr>());
-    } 
+    }
     if is_a(quals_node.cast(), NodeTag::T_BoolExpr) {
         boolexprs.push(quals_node.cast::<BoolExpr>());
     }
@@ -34,8 +37,8 @@ pub unsafe fn get_where_object(
                 opexprs.push(t.cast::<OpExpr>());
             } else if is_a(t.cast(), NodeTag::T_BoolExpr) {
                 boolexprs.push(t.cast::<BoolExpr>());
-            } 
-        }        
+            }
+        }
     }
 
     for node in opexprs {
@@ -66,9 +69,23 @@ pub unsafe fn get_where_object(
                 let varno = var.as_ref().unwrap().varno;
 
                 let rte = rt_fetch(varno, range_table);
+
+                if (*rte).relkind as u8 != RELKIND_RELATION {
+                    continue;
+                }
+                let tbl_data = *(*rte).eref;
+                let tbl_name = CStr::from_ptr(tbl_data.aliasname);
+                let tbl_name = tbl_name
+                    .to_str()
+                    .expect("Failed to convert Postgres query string for rust");
+
+                if table_name != tbl_name {
+                    continue;
+                }
+
                 let rte_relid = rte.as_ref().unwrap().relid;
-                let rte_name = get_attname(rte_relid, var_attid, true);
-                let rte_name_str = CStr::from_ptr(rte_name).to_str().unwrap();
+                let col_name = get_attname(rte_relid, var_attid, true);
+                let col_name_str = CStr::from_ptr(col_name).to_str().unwrap();
 
                 let consstt = constt.as_ref().unwrap();
                 let const_cons = consstt.constvalue;
@@ -80,11 +97,15 @@ pub unsafe fn get_where_object(
                 let qual_value = CStr::from_ptr(const_type_output)
                     .to_str()
                     .expect("Failed to convert Postgres query string for rust");
-                let s =
-                    format!("PostgresRedis > The query qual is  {rte_name_str} = {qual_value}");
-                notice!("{s}");
 
-                result = Some((String::from(rte_name_str), qual_value.to_string()));
+                if col_name_str == key_column_name {
+                    let s =
+                        format!("PostgresRedis > The query qual is  {col_name_str} = {qual_value}");
+                    notice!("{s}");
+
+                    result = Some((String::from(col_name_str), qual_value.to_string()));
+                    break;
+                }
             }
         }
     }
@@ -97,4 +118,30 @@ unsafe fn node_fetch(range_table: *mut List, index: usize) -> *mut Node {
         .get(index)
         .expect("node_fetch used out-of-bounds")
         .cast()
+}
+
+pub fn is_contain_table(table_lists: *mut List, expected_table_name: &str) -> bool {
+    let mut result = false;
+    unsafe {
+        let mut length = 0;
+        if !table_lists.is_null() {
+            length = table_lists.as_ref().unwrap().length;
+        }
+        for i in 1..=length {
+            let table_entry = *rt_fetch(i as u32, table_lists);
+            if table_entry.relkind as u8 != RELKIND_RELATION {
+                continue;
+            }
+            let table_data = *table_entry.eref;
+            let name = CStr::from_ptr(table_data.aliasname);
+            let name = name
+                .to_str()
+                .expect("Failed to convert Postgres query string for rust");
+            if name == expected_table_name {
+                result = true;
+                break;
+            }
+        }
+    }
+    result
 }
