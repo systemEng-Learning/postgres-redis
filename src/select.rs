@@ -1,8 +1,7 @@
 use pgrx::{
     pg_sys::{
-        self, getTypeOutputInfo, rt_fetch, slot_getsomeattrs_int, CommandDest,
-        CommandDest_DestNone, Datum, DestReceiver, Oid, OidOutputFunctionCall, TupleDesc,
-        TupleTableSlot, RELKIND_RELATION,
+        self, getTypeOutputInfo, slot_getsomeattrs_int, CommandDest, CommandDest_DestNone, Datum,
+        DestReceiver, Oid, OidOutputFunctionCall, TupleDesc, TupleTableSlot,
     },
     prelude::*,
 };
@@ -48,51 +47,6 @@ pub fn handle_select(
             s
         );
     }
-
-    if !custom_receiver.is_none() {
-        let custom_receiver = custom_receiver.as_ref().unwrap();
-        if custom_receiver.values.len() > 0 {
-            let t = custom_receiver.values.join(", ");
-            let s = format!(
-                "PostgresRedis > The values of column {} in table {expected_table_name} are {t}",
-                custom_receiver.column
-            );
-            ereport!(
-                PgLogLevel::NOTICE,
-                PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
-                s
-            );
-        }
-    }
-}
-
-pub fn is_contain_table(query_desc: &PgBox<pg_sys::QueryDesc>, expected_table_name: &str) -> bool {
-    let mut result = false;
-    unsafe {
-        let p = *(query_desc.plannedstmt);
-
-        let table_lists = p.rtable;
-        let mut length = 0;
-        if !table_lists.is_null() {
-            length = table_lists.as_ref().unwrap().length;
-        }
-        for i in 1..=length {
-            let table_entry = *rt_fetch(i as u32, table_lists);
-            if table_entry.relkind as u8 != RELKIND_RELATION {
-                continue;
-            }
-            let table_data = *table_entry.eref;
-            let name = CStr::from_ptr(table_data.aliasname);
-            let name = name
-                .to_str()
-                .expect("Failed to convert Postgres query string for rust");
-            if name == expected_table_name {
-                result = true;
-                break;
-            }
-        }
-    }
-    result
 }
 
 #[repr(C)]
@@ -109,7 +63,8 @@ pub struct CustomDestReceiver {
     pub mydest: CommandDest,
     pub original_dest: Option<*mut DestReceiver>,
     pub column: String,
-    pub values: Vec<String>,
+    pub value: Option<String>,
+    pub is_single: bool,
 }
 
 pub fn create_custom_dest_receiver(column: &str) -> CustomDestReceiver {
@@ -121,7 +76,8 @@ pub fn create_custom_dest_receiver(column: &str) -> CustomDestReceiver {
         mydest: CommandDest_DestNone,
         original_dest: None,
         column: String::from(column),
-        values: Vec::new(),
+        value: None,
+        is_single: true,
     }
 }
 
@@ -134,31 +90,37 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
     );
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
-        let typeinfo = (*slot).tts_tupleDescriptor;
-        let tinfo = &(*typeinfo);
-        let nattrs = tinfo.natts as usize;
-        let attrs = tinfo.attrs.as_slice(nattrs);
-        let mut typoutput: Oid = Oid::default();
-        let mut typvarlena: bool = false;
         let custom_receiver = &mut *custom_receiver;
-        for i in 0..nattrs {
-            let attr = slot_getattr(slot, i + 1);
-            if attr.is_none() {
-                continue;
-            }
-            let attr = attr.unwrap();
-            getTypeOutputInfo(
-                attrs[i].atttypid,
-                &mut typoutput as *mut Oid,
-                &mut typvarlena as *mut bool,
-            );
-            let value = OidOutputFunctionCall(typoutput, attr);
-            let value = CStr::from_ptr(value);
-            let value = value
-                .to_str()
-                .expect("Failed to convert Postgres query string for rust");
-            if attrs[i].name() == custom_receiver.column {
-                custom_receiver.values.push(String::from(value));
+        if custom_receiver.value.is_some() {
+            custom_receiver.value = None;
+            custom_receiver.is_single = false;
+        }
+        if custom_receiver.is_single {
+            let typeinfo = (*slot).tts_tupleDescriptor;
+            let tinfo = &(*typeinfo);
+            let nattrs = tinfo.natts as usize;
+            let attrs = tinfo.attrs.as_slice(nattrs);
+            let mut typoutput: Oid = Oid::default();
+            let mut typvarlena: bool = false;
+            for i in 0..nattrs {
+                let attr = slot_getattr(slot, i + 1);
+                if attr.is_none() {
+                    continue;
+                }
+                let attr = attr.unwrap();
+                getTypeOutputInfo(
+                    attrs[i].atttypid,
+                    &mut typoutput as *mut Oid,
+                    &mut typvarlena as *mut bool,
+                );
+                let value = OidOutputFunctionCall(typoutput, attr);
+                let value = CStr::from_ptr(value);
+                let value = value
+                    .to_str()
+                    .expect("Failed to convert Postgres query string for rust");
+                if attrs[i].name() == custom_receiver.column {
+                    custom_receiver.value = Some(value.to_string());
+                }
             }
         }
         let custom_receiver = &*custom_receiver;
