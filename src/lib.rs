@@ -227,12 +227,21 @@ pub extern "C" fn postgres_redis_background() {
         BackgroundWorker::get_name()
     );
 
+    let client = redis::Client::open("redis://127.0.0.1").unwrap();
+    let mut connection = client.get_connection().unwrap();
+    let mut pipe = redis::pipe();
+
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
         let results = move_redis_data();
         for i in results.iter() {
             let key: String = i.key[0..i.key_length as usize].iter().collect();
             let value: String = i.value[0..i.value_length as usize].iter().collect();
             log!("From bg: {key} => {value}");
+            pipe.set(key, value).ignore();
+        }
+        if results.len() > 0 {
+            let _: () = pipe.query(&mut connection).unwrap();
+            pipe.clear();
         }
     }
 }

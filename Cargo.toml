@@ -19,6 +19,7 @@ pg_test = []
 [dependencies]
 heapless = "0.7.17"
 pgrx = "=0.11.3"
+redis = "0.25.1"
 regex = "1.10.3"
 
 [dev-dependencies]
