@@ -6,6 +6,7 @@ use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 use update::UpdateDestReceiver;
+pub mod gucs;
 pub mod prshmem;
 pub mod select;
 pub mod update;
@@ -209,6 +210,7 @@ unsafe fn init_hook() {
 
 #[pg_guard]
 pub unsafe extern "C" fn _PG_init() {
+    gucs::init();
     init_redis_buffer();
     init_hook();
     BackgroundWorkerBuilder::new("PGRedis Experiment")
@@ -226,8 +228,16 @@ pub extern "C" fn postgres_redis_background() {
         "Hello from inside the {} BGWorker",
         BackgroundWorker::get_name()
     );
-
-    let client = redis::Client::open("redis://127.0.0.1").unwrap();
+    if gucs::PGD_REDIS_URL.get().is_none() {
+        log!("Redis URL is not set");
+        return;
+    }
+    let url = gucs::PGD_REDIS_URL
+        .get()
+        .unwrap()
+        .to_str()
+        .expect("URL extraction failed");
+    let client = redis::Client::open(url).unwrap();
     let mut connection = client.get_connection().unwrap();
     let mut pipe = redis::pipe();
 
