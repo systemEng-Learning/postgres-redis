@@ -3,6 +3,7 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
+use serde_json::Value;
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 use update::UpdateDestReceiver;
@@ -202,9 +203,17 @@ fn hello_postgres_redis() -> &'static str {
     "Hello, postgres_redis"
 }
 unsafe fn init_hook() {
-    HOOK.table = Some(String::from("test"));
-    HOOK.key_column = Some(String::from("title"));
-    HOOK.value_column = Some(String::from("description"));
+    let data = r#"
+        {
+            "table": "test",
+            "key_column": "title",
+            "value_column": "description"
+        }
+    "#;
+    let v: Value = serde_json::from_str(data).unwrap();
+    HOOK.table = Some(v["table"].as_str().unwrap().to_string());
+    HOOK.key_column = Some(v["key_column"].as_str().unwrap().to_string());
+    HOOK.value_column = Some(v["value_column"].as_str().unwrap().to_string());
     register_hook(&mut HOOK);
 }
 
