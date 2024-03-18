@@ -3,9 +3,11 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
+use serde_json::Value;
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 use update::UpdateDestReceiver;
+pub mod gucs;
 pub mod prshmem;
 pub mod select;
 pub mod update;
@@ -201,14 +203,23 @@ fn hello_postgres_redis() -> &'static str {
     "Hello, postgres_redis"
 }
 unsafe fn init_hook() {
-    HOOK.table = Some(String::from("test"));
-    HOOK.key_column = Some(String::from("title"));
-    HOOK.value_column = Some(String::from("description"));
+    let data = r#"
+        {
+            "table": "test",
+            "key_column": "title",
+            "value_column": "description"
+        }
+    "#;
+    let v: Value = serde_json::from_str(data).unwrap();
+    HOOK.table = Some(v["table"].as_str().unwrap().to_string());
+    HOOK.key_column = Some(v["key_column"].as_str().unwrap().to_string());
+    HOOK.value_column = Some(v["value_column"].as_str().unwrap().to_string());
     register_hook(&mut HOOK);
 }
 
 #[pg_guard]
 pub unsafe extern "C" fn _PG_init() {
+    gucs::init();
     init_redis_buffer();
     init_hook();
     BackgroundWorkerBuilder::new("PGRedis Experiment")
@@ -226,6 +237,18 @@ pub extern "C" fn postgres_redis_background() {
         "Hello from inside the {} BGWorker",
         BackgroundWorker::get_name()
     );
+    if gucs::PGD_REDIS_URL.get().is_none() {
+        log!("Redis URL is not set");
+        return;
+    }
+    let url = gucs::PGD_REDIS_URL
+        .get()
+        .unwrap()
+        .to_str()
+        .expect("URL extraction failed");
+    let client = redis::Client::open(url).unwrap();
+    let mut connection = client.get_connection().unwrap();
+    let mut pipe = redis::pipe();
 
     let client = redis::Client::open("redis://127.0.0.1").unwrap();
     let mut connection = client.get_connection().unwrap();
