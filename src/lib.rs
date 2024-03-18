@@ -250,10 +250,6 @@ pub extern "C" fn postgres_redis_background() {
     let mut connection = client.get_connection().unwrap();
     let mut pipe = redis::pipe();
 
-    let client = redis::Client::open("redis://127.0.0.1").unwrap();
-    let mut connection = client.get_connection().unwrap();
-    let mut pipe = redis::pipe();
-
     while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
         let results = move_redis_data();
         for i in results.iter() {
