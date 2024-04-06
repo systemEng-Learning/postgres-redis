@@ -3,7 +3,6 @@ use std::time::Duration;
 use pgrx::bgworkers::{BackgroundWorker, BackgroundWorkerBuilder, SignalWakeFlags};
 use pgrx::pg_sys::{CmdType_CMD_SELECT, CmdType_CMD_UPDATE, DestReceiver};
 use pgrx::{prelude::*, register_hook, HookResult, PgHooks};
-use serde_json::Value;
 use prshmem::{add_item, init_redis_buffer, move_redis_data, Info};
 use select::{create_custom_dest_receiver, CustomDestReceiver};
 use update::UpdateDestReceiver;
@@ -203,17 +202,39 @@ fn hello_postgres_redis() -> &'static str {
     "Hello, postgres_redis"
 }
 unsafe fn init_hook() {
-    let data = r#"
-        {
-            "table": "test",
-            "key_column": "title",
-            "value_column": "description"
-        }
-    "#;
-    let v: Value = serde_json::from_str(data).unwrap();
-    HOOK.table = Some(v["table"].as_str().unwrap().to_string());
-    HOOK.key_column = Some(v["key_column"].as_str().unwrap().to_string());
-    HOOK.value_column = Some(v["value_column"].as_str().unwrap().to_string());
+    if gucs::PGD_REDIS_TABLE.get().is_none() {
+        log!("Table name is not set");
+        return;
+    }
+    if gucs::PGD_KEY_COLUMN.get().is_none() {
+        log!("Table key column is not set");
+        return;
+    }
+    if gucs::PGD_VALUE_COLUMN.get().is_none() {
+        log!("Table value column is not set");
+        return;
+    }
+    let table_name = gucs::PGD_REDIS_TABLE
+        .get()
+        .unwrap()
+        .to_str()
+        .expect("table name extraction failed");
+
+    let key_column = gucs::PGD_KEY_COLUMN
+        .get()
+        .unwrap()
+        .to_str()
+        .expect("key column extraction failed");
+
+    let value_column = gucs::PGD_VALUE_COLUMN
+        .get()
+        .unwrap()
+        .to_str()
+        .expect("value column extraction failed");
+
+    HOOK.table = Some(table_name.to_string());
+    HOOK.key_column = Some(key_column.to_string());
+    HOOK.value_column = Some(value_column.to_string());
     register_hook(&mut HOOK);
 }
 
