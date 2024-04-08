@@ -23,7 +23,6 @@ pub fn handle_update(
     expected_column: &str,
     update_receiver: &mut UpdateDestReceiver,
 ) {
-
     unsafe {
         let estate = *(query_desc.estate);
 

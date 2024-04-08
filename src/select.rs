@@ -5,6 +5,14 @@ use pgrx::pg_sys::{
 use std::ffi::CStr;
 use std::os::raw::c_int;
 
+/// This struct is an extension of the postgres DestReceiver. It includes all the
+/// required members (including functions). It includes additional members like the
+/// original destreceiver from the querydesc, the required column, value that will hold
+/// the extracted tuple value and a flag to detect if multiple or single rows are returned.
+///
+/// The original destreceiver is needed so that any calls to this destreceiver in the execution
+/// run stage will ensure that the same call is made to the original one. This ensures that this
+/// plugin does not change the normal execution mode.
 #[repr(C)]
 #[allow(non_snake_case)]
 #[derive(Debug, Clone)]
@@ -37,6 +45,13 @@ pub fn create_custom_dest_receiver(column: &str) -> CustomDestReceiver {
     }
 }
 
+/// This receives a tuple from the select query executor and extracts the value of the receiver
+/// `column` member. The single flag ensures that this receiver extracts the tuple value if
+/// the query returns a single row. If multiple rows are returned, the previous value is discarded
+/// and extraction never happens again.
+///
+/// Once extraction is carried out, the tuple is sent to the `receive` function of the original
+/// destreceiver.
 pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver) -> bool {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
@@ -82,6 +97,7 @@ pub extern "C" fn receive(slot: *mut TupleTableSlot, receiver: *mut DestReceiver
     true
 }
 
+/// Run the startup function of the original destreceiver.
 pub extern "C" fn startup(receiver: *mut DestReceiver, operation: c_int, typeinfo: TupleDesc) {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
@@ -93,6 +109,7 @@ pub extern "C" fn startup(receiver: *mut DestReceiver, operation: c_int, typeinf
     }
 }
 
+/// Run the shutdown function of the original destreceiver.
 pub extern "C" fn shutdown(receiver: *mut DestReceiver) {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
@@ -104,6 +121,7 @@ pub extern "C" fn shutdown(receiver: *mut DestReceiver) {
     }
 }
 
+/// Run the destroy function of the original destreceiver.
 pub extern "C" fn destroy(receiver: *mut DestReceiver) {
     let custom_receiver = receiver as *mut CustomDestReceiver;
     unsafe {
@@ -115,6 +133,8 @@ pub extern "C" fn destroy(receiver: *mut DestReceiver) {
     }
 }
 
+/// A Rust port of the same named Postgres function
+/// https://github.com/postgres/postgres/blob/422041542f313f23ca66cad26e9b2b99c4d1999a/src/include/executor/tuptable.h#L396
 unsafe fn slot_getattr(slot: *mut TupleTableSlot, attnum: usize) -> Option<Datum> {
     let real_slot = &(*slot);
     if attnum as i16 > real_slot.tts_nvalid {

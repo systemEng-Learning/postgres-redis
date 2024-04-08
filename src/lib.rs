@@ -38,10 +38,14 @@ impl PgHooks for PRHook {
             bound_params: PgBox<pg_sys::ParamListInfoData>,
         ) -> HookResult<*mut pg_sys::PlannedStmt>,
     ) -> HookResult<*mut pg_sys::PlannedStmt> {
+        // Set a flag to true if the query involves the tracked table. This flag will be used
+        // for a quick check throughout the rest of the process execution to determine if the
+        // rest of the plugin should run.
         self.keep_running = utils::is_contain_table(parse.rtable, self.table.as_ref().unwrap());
         if !self.keep_running {
             return prev_hook(parse, query_string, cursor_options, bound_params);
         }
+
         unsafe {
             self.where_clause_receiver = utils::get_where_object(
                 parse.jointree,
@@ -50,18 +54,13 @@ impl PgHooks for PRHook {
                 self.key_column.as_ref().unwrap(),
             );
         }
+
+        // Set the above explained flag to false if our configured key column isn't part of the
+        // WHERE clause.
         if self.where_clause_receiver.is_none() {
             self.keep_running = false;
         }
         prev_hook(parse, query_string, cursor_options, bound_params)
-    }
-    fn executor_start(
-        &mut self,
-        query_desc: PgBox<pg_sys::QueryDesc>,
-        eflags: i32,
-        prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>, eflags: i32) -> HookResult<()>,
-    ) -> HookResult<()> {
-        prev_hook(query_desc, eflags)
     }
     fn executor_run(
         &mut self,
@@ -78,6 +77,13 @@ impl PgHooks for PRHook {
     ) -> pgrx::HookResult<()> {
         let op = query_desc.operation;
         if op == CmdType_CMD_SELECT && self.keep_running {
+            // A DestReceiver object receives any tuples emitted by the select query. Every
+            // QueryDesc object contains a destreceiver object. In other to get the emitted
+            // tuples, the querydesc destreceiver pointer needs to be updated to a custom
+            // destreceiver object whose functions can intercept and process the tuples. After
+            // replacement, the `prev_hook` function runs with this custom destreceiver. This
+            // `prev_hook` function will execute the main postgres execution_run function which
+            // should bring our custom destrecevier object into play.
             let mut custom_receiver: CustomDestReceiver =
                 create_custom_dest_receiver(self.value_column.as_ref().unwrap());
             custom_receiver.original_dest = Some(query_desc.dest);
@@ -104,11 +110,8 @@ impl PgHooks for PRHook {
         query_desc: PgBox<pg_sys::QueryDesc>,
         prev_hook: fn(query_desc: PgBox<pg_sys::QueryDesc>) -> pgrx::HookResult<()>,
     ) -> pgrx::HookResult<()> {
-        if !self.keep_running {
-            return prev_hook(query_desc);
-        }
         let op = query_desc.operation;
-        if op == CmdType_CMD_UPDATE {
+        if op == CmdType_CMD_UPDATE && self.keep_running {
             let mut new_update_receiver = UpdateDestReceiver {
                 value: None,
                 column: String::new(),
@@ -124,6 +127,9 @@ impl PgHooks for PRHook {
     }
 
     fn commit(&mut self) {
+        // Get the values of the key and value columns from the where clause object and custom/update receiver objects
+        // respectively. After extracting these, add them to the shared memory array. If the extraction
+        // happens, set the objects to null.
         if self.custom_receiver.is_some() {
             let custom_receiver = self.custom_receiver.as_ref().unwrap();
             let key_string = &(self.where_clause_receiver.as_ref().unwrap().1);
@@ -149,6 +155,7 @@ impl PgHooks for PRHook {
     }
 
     fn abort(&mut self) {
+        // Set all the objects to null if transaction aborts.
         if self.custom_receiver.is_some() {
             self.custom_receiver = None;
         }
@@ -228,6 +235,9 @@ pub unsafe extern "C" fn _PG_init() {
         .load();
 }
 
+// This runs a custom postgres background worker that gets all the data in the shared memory
+// arrays and sends them to the redis service. The worker wakes up every `bg_delay` seconds to check
+// if the shared memory contains any data.
 #[pg_guard]
 #[no_mangle]
 pub extern "C" fn postgres_redis_background() {
@@ -249,7 +259,9 @@ pub extern "C" fn postgres_redis_background() {
     let mut connection = client.get_connection().unwrap();
     let mut pipe = redis::pipe();
 
-    while BackgroundWorker::wait_latch(Some(Duration::from_secs(10))) {
+    let delay = gucs::PGD_BG_DELAY.get() as u64;
+
+    while BackgroundWorker::wait_latch(Some(Duration::from_secs(delay))) {
         let results = move_redis_data();
         for i in results.iter() {
             let key: String = i.key[0..i.key_length as usize].iter().collect();
