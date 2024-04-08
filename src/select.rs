@@ -5,7 +5,7 @@ use pgrx::pg_sys::{
 use std::ffi::CStr;
 use std::os::raw::c_int;
 
-/// This struct is an implementation of the postgres DestReceiver. It includes all the
+/// This struct is an extension of the postgres DestReceiver. It includes all the
 /// required members (including functions). It includes additional members like the
 /// original destreceiver from the querydesc, the required column, value that will hold
 /// the extracted tuple value and a flag to detect if multiple or single rows are returned.
