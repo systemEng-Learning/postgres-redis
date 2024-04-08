@@ -108,20 +108,13 @@ impl PgHooks for PRHook {
             return prev_hook(query_desc);
         }
         let op = query_desc.operation;
-        if op == CmdType_CMD_SELECT {
-            select::handle_select(
-                &query_desc,
-                self.table.as_ref().unwrap(),
-                &self.custom_receiver,
-            );
-        } else if op == CmdType_CMD_UPDATE {
+        if op == CmdType_CMD_UPDATE {
             let mut new_update_receiver = UpdateDestReceiver {
                 value: None,
                 column: String::new(),
             };
             update::handle_update(
                 &query_desc,
-                self.table.as_ref().unwrap(),
                 self.value_column.as_ref().unwrap(),
                 &mut new_update_receiver,
             );
@@ -136,11 +129,6 @@ impl PgHooks for PRHook {
             let key_string = &(self.where_clause_receiver.as_ref().unwrap().1);
             if custom_receiver.value.is_some() {
                 let t = custom_receiver.value.as_ref().unwrap();
-                notice!(
-                    "PostgresRedis > The values of column {} in table {} are {t}",
-                    custom_receiver.column,
-                    self.table.as_ref().unwrap()
-                );
                 add_item(Info::new(key_string, t));
             }
             self.custom_receiver = None;
@@ -149,23 +137,12 @@ impl PgHooks for PRHook {
             let key_string = &(self.where_clause_receiver.as_ref().unwrap().1);
             if update_receiver.value.is_some() {
                 let t = update_receiver.value.as_ref().unwrap();
-                notice!(
-                    "PostgresRedis > The values updated of column {} in table {} are {t}",
-                    update_receiver.column,
-                    self.table.as_ref().unwrap()
-                );
                 add_item(Info::new(key_string, t));
             }
             self.update_receiver = None;
         }
 
         if self.where_clause_receiver.is_some() {
-            let where_clause = self.where_clause_receiver.as_ref().unwrap();
-            notice!(
-                "PostgresRedis > The value of where clause for column {} is {}",
-                where_clause.0,
-                where_clause.1
-            );
             self.where_clause_receiver = None;
         }
         self.keep_running = true;
@@ -201,6 +178,7 @@ static mut HOOK: PRHook = PRHook {
 fn hello_postgres_redis() -> &'static str {
     "Hello, postgres_redis"
 }
+
 unsafe fn init_hook() {
     if gucs::PGD_REDIS_TABLE.get().is_none() {
         log!("Table name is not set");

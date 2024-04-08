@@ -20,37 +20,9 @@ impl UpdateDestReceiver {
 
 pub fn handle_update(
     query_desc: &PgBox<pg_sys::QueryDesc>,
-    expected_table_name: &str,
     expected_column: &str,
     update_receiver: &mut UpdateDestReceiver,
 ) {
-    let c_str = unsafe { CStr::from_ptr(query_desc.sourceText) };
-    let rust_str = c_str.to_str().expect("Failed to convert CStr to str");
-
-    let mut single_row = false;
-
-    let s = format!(
-        "PostgresRedis > Hello World!!! updated table {expected_table_name} using this query {rust_str}"
-    );
-    ereport!(
-        PgLogLevel::NOTICE,
-        PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
-        s
-    );
-    unsafe {
-        let estate = *(query_desc.estate);
-        if estate.es_processed == 1 {
-            single_row = true;
-        }
-    }
-    if single_row {
-        let s = format!("PostgresRedis > Hello World for updating only one row");
-        ereport!(
-            PgLogLevel::NOTICE,
-            PgSqlErrorCode::ERRCODE_SUCCESSFUL_COMPLETION,
-            s
-        );
-    }
 
     unsafe {
         let estate = *(query_desc.estate);

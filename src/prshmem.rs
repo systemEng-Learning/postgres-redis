@@ -49,7 +49,6 @@ pub fn add_item(item: Info) {
         .unwrap_or_else(|_| warning!("Vector is full, discarding update"));
 }
 
-#[pg_guard]
 pub fn init_redis_buffer() {
     pg_shmem_init!(REDIS_BUFFER);
 }

@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 
 use pgrx::{
-    is_a, list, notice,
+    is_a, list,
     pg_sys::{
         self, eval_const_expressions, getTypeOutputInfo, get_attname, rt_fetch, BoolExpr, FromExpr,
         List, Node, NodeTag, Oid, OidOutputFunctionCall, OpExpr, TextEqualOperator,
@@ -99,10 +99,6 @@ pub unsafe fn get_where_object(
                     .expect("Failed to convert Postgres query string for rust");
 
                 if col_name_str == key_column_name {
-                    let s =
-                        format!("PostgresRedis > The query qual is  {col_name_str} = {qual_value}");
-                    notice!("{s}");
-
                     result = Some((String::from(col_name_str), qual_value.to_string()));
                     break;
                 }
