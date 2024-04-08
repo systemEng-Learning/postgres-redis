@@ -11,6 +11,7 @@ In the same conf file, set the following parameters:
 * `postgres_redis.table (string)`: Table to monitor for select and update query execution.
 * `postgres_redis.key_column(string)`: Table column name whose value will be used as the redis key when running the `set` command.
 * `postgres_redis.value_column(string)`: Table column name whose value will be used as the redis value when running the `set` command.
+* `postgres_redis.bg_delay(integer)`: Specifies the delay (in seconds) between activity rounds for the background postgres redis background worker. In each round, the background worker checks to see if there are new or changed values to send to the redis service. 
 
 This is an example usage:
 
@@ -22,6 +23,7 @@ postgres_redis.redis_url = 'redis://127.0.0.1'
 postgres_redis.table = 'users'
 postgres_redis.key_column = 'first_name'
 postgres_redis.value_column = 'last_name'
+postgres_redis.bg_delay = 10
 ```
 
 ### Running the extension
