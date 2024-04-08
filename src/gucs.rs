@@ -23,7 +23,7 @@ pub fn init() {
         GucFlags::default(),
     );
     GucRegistry::define_string_guc(
-        "postgres_redis.redis_table",
+        "postgres_redis.table",
         "Table name",
         "The table name to track for changes.",
         &PGD_REDIS_TABLE,
